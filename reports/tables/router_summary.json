@@ -1,0 +1,29 @@
+{
+  "router": {
+    "high (Q4)": "Item-kNN",
+    "low (Q2)": "Hybrid",
+    "medium (Q3)": "Item-kNN",
+    "sparse (Q1)": "ALS"
+  },
+  "router_test_metrics": {
+    "Recall@K": 0.08750541940145261,
+    "Precision@K": 0.08075752451809266,
+    "MAP@K": 0.05241203225487892,
+    "NDCG@K": 0.10645777648096685,
+    "n_users": 5914,
+    "Coverage@K": 0.2143051400598314,
+    "Novelty@K": 9.113430626310839,
+    "Diversity@K": 0.6178493499755859,
+    "AvgPopularity@K": 1681.6791680757524
+  },
+  "edges_val": [
+    31.0,
+    67.0,
+    146.0
+  ],
+  "edges_test": [
+    37.0,
+    82.0,
+    177.0
+  ]
+}

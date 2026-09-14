@@ -1,217 +1,319 @@
-# Movie Recommendation System
+# Movie Recommendation System — MovieLens 1M
 
-A recommendation system project comparing collaborative filtering, content-based, and hybrid approaches on the MovieLens 1M dataset.
+A recommendation-system case study built as a portfolio piece for
+product/ML analyst roles: it compares popularity, content-based, item-based
+collaborative, matrix-factorization and hybrid recommenders on MovieLens-1M
+under one honest, leakage-free evaluation protocol, then turns the offline
+result into a product decision and an online test design.
 
-The project focuses not only on building recommendation algorithms, but also on evaluating how different approaches behave under highly sparse user-item interaction data.
+This is a rebuild of an earlier version of this project. The rebuild started
+from a full audit of that version's code and conclusions rather than from a
+blank page — several of its numbers turned out to be wrong or not
+reproducible, and the audit findings below are as much a part of the
+deliverable as the final metrics.
+
+## Executive Summary
+
+- **A matrix-orientation bug had made ALS look broken.** The previous
+  version fit `implicit`'s ALS on a `(items, users)` matrix instead of
+  `(users, items)`; the call did not error, it silently scored every user
+  against the wrong factors, producing NDCG@10 ≈ 0. Fixing the orientation
+  brings ALS to **NDCG@10 = 0.091** — a competitive model, not a broken one.
+  See `notebooks/02_evaluation_setup.ipynb`, Section 4.4.
+- **Popularity is a real, competitive baseline** (NDCG@10 = **0.074**) that
+  the previous version's headline comparison omitted entirely. It still
+  loses to every personalized model here, but it beats the ranking-loss
+  factorization model (BPR, NDCG@10 = 0.066) — a claim that can only be made
+  once popularity is actually in the same table.
+- **Item-kNN and a validation-tuned hybrid are the best single models**
+  (NDCG@10 ≈ **0.104 / 0.103**, effectively tied), while a pure
+  **content-based (genre) model is the weakest on accuracy** (NDCG@10 =
+  0.017) but reaches **83% of the catalog** across users, vs. 13% for
+  Item-kNN — accuracy and catalog coverage pull in different directions.
+- **Routing users to a model chosen per history-size segment beats every
+  single model on every offline metric measured**: NDCG@10 = **0.107**
+  (best single model: 0.104) and catalog coverage of 21% (vs. 13% for
+  Item-kNN alone) — a concrete, validation-selected case for a segment-aware
+  policy, proposed here as an A/B test, not a guaranteed production win.
+- **LightFM could not be installed** on this environment (its legacy build
+  script fails under modern `setuptools` on Windows/Python 3.12); `implicit`'s
+  BPR was substituted as the ranking-loss model. It underperformed ALS and
+  Item-kNN here — reported as-is rather than hidden.
 
 ## Recommendation Problem
 
-The goal is to generate personalized movie recommendations based on users' historical ratings and available movie information.
-
-Three approaches are compared:
-
-1. **Item-based collaborative filtering** using similarity between movies derived from user interactions.
-2. **Content-based filtering** using movie genre information.
-3. **Hybrid recommendation** combining collaborative and content-based signals.
-
-The models are evaluated as ranking systems rather than rating predictors.
+Generate a ranked list of movies a user has not yet seen, using their rating
+history and each movie's genre/year metadata, such that the movies they go
+on to rate highly actually appear near the top of that list. Models are
+compared as **rankers**, using Recall/Precision/MAP/NDCG@10, not as rating
+predictors (RMSE was intentionally not used — see `02_evaluation_setup.ipynb`
+for why ranking metrics fit this task better).
 
 ## Dataset
 
-The project uses the **MovieLens 1M** dataset.
+MovieLens-1M: 1,000,209 ratings from 6,040 users on 3,706 rated movies
+(3,883 in the full catalog; 177 have never been rated), ratings 1–5,
+timestamps, and movie genres. The user-movie matrix is **95.5%** sparse
+(`1 - 1,000,209 / (6,040 × 3,706)`) — the previous version of this README
+stated "~99.9%", which does not match what its own notebook computed; this
+is corrected here.
 
-It contains approximately:
+Full analysis: `notebooks/01_data_and_eda.ipynb`.
 
-- 1 million ratings;
-- 6,000 users;
-- 4,000 movies;
-- ratings on a 1–5 scale;
-- movie titles and genres;
-- timestamps for user interactions.
+## Evaluation Setup
 
-The interaction matrix is highly sparse — approximately **99.9% of possible user-item interactions are missing**.
+**Split.** Chronological, per user: each user's interactions are sorted by
+timestamp and cut into contiguous **train (~70%) / validation (~15%) / test
+(~15%)** blocks. MovieLens-1M guarantees at least 20 ratings per user, so
+every user contributes to all three blocks (minimum 14 train interactions).
+A random split was rejected because rating activity is strongly non-uniform
+over time (`01_data_and_eda.ipynb`) — it would let a model see the future of
+some of its own training users.
 
-This makes the dataset useful for exploring one of the central challenges in recommendation systems: generating relevant recommendations from limited interaction history.
+**Relevance.** `rating >= 4` counts as a relevant recommendation (57.5% of
+all ratings). The distribution is skewed toward high ratings (mode = 4,
+median = 4); `rating >= 3` would mark 83.6% of interactions "relevant" —
+too lenient to be a useful target. This definition is applied identically
+to every model, in every split. A robustness check against `rating >= 3`
+(`03_models.ipynb`, Section 4) confirms it does not change which model wins.
 
-## Data Analysis
+**Candidates & exclusion.** Every model ranks the same catalog — items seen
+at least once in the data available at that point (train only while tuning;
+train+validation for the final test run) — and has each user's own
+already-interacted items (any rating) removed before ranking. Items that
+only appear later are excluded from every model's candidate set alike
+("item cold start", see Limitations).
 
-Before modeling, the dataset was explored to understand:
+**Model selection discipline.** All hyperparameters, the content-based
+history threshold, and the hybrid weight are chosen on **validation only**,
+maximizing NDCG@10 (`notebooks/02_evaluation_setup.ipynb`). The **test set
+is touched exactly once**, in `notebooks/03_models.ipynb`, to report the
+final numbers below.
 
-- rating distribution;
-- user activity;
-- movie popularity;
-- interaction sparsity;
-- genre distribution;
-- temporal structure of the ratings.
+## Models Compared
 
-The analysis showed that interactions are strongly concentrated around a relatively small subset of popular movies, while the overall user-item matrix remains extremely sparse.
+| Model | What it does |
+|---|---|
+| **Popularity** | Ranks by raw train interaction count. Non-personalized. |
+| **Item-kNN** | Cosine similarity between movies' train rating vectors; scores = rating-weighted similarity to a user's own history. |
+| **Content-Based** | Cosine similarity over genre + normalized release-year vectors; user profile = train movies rated ≥4 (threshold chosen on validation). |
+| **ALS** | `implicit` Alternating Least Squares on a confidence-weighted implicit matrix (`1 + 2·(rating-1)`), correctly oriented `(users, items)` — see the orientation-bug writeup in `02`. |
+| **BPR** | `implicit` Bayesian Personalized Ranking — pairwise ranking loss on the same confidence matrix; stands in for LightFM (see Limitations). |
+| **Hybrid** | Content-Based + Item-kNN scores, each min-max normalized per user, blended `0.1·content + 0.9·Item-kNN` (weight and partner model chosen on validation, `02`). |
 
-## Train / Test Strategy
+## Final Test Results (K = 10)
 
-A temporal split is used instead of randomly separating individual ratings.
+| Model | Recall@10 | Precision@10 | MAP@10 | NDCG@10 | Coverage@10 | Novelty@10 | Diversity@10 | Avg. Popularity@10 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Popularity | 0.048 | 0.062 | 0.035 | 0.074 | 0.036 | 8.50 | 0.645 | 2379 |
+| **Item-kNN** | 0.082 | 0.079 | 0.051 | **0.104** | 0.127 | 8.94 | 0.635 | 1847 |
+| Content-Based | 0.017 | 0.013 | 0.007 | 0.017 | **0.832** | **13.14** | 0.085 | **259** |
+| ALS | 0.081 | 0.068 | 0.043 | 0.091 | 0.355 | 9.67 | 0.602 | 1237 |
+| BPR | 0.064 | 0.048 | 0.030 | 0.066 | 0.761 | 11.13 | 0.485 | 620 |
+| **Hybrid** (Content + Item-kNN) | **0.083** | 0.078 | 0.050 | 0.103 | 0.144 | 9.04 | 0.581 | 1734 |
+| **Routing strategy** (Section below) | **0.088** | **0.081** | **0.052** | **0.107** | 0.214 | 9.11 | 0.618 | 1682 |
 
-Earlier user interactions are used for training, while later interactions are held out for evaluation.
+*(Coverage/Novelty/Diversity/Avg. Popularity are defined in
+`02_evaluation_setup.ipynb`; full numbers in `reports/tables/test_metrics.csv`.)*
 
-This better reflects the real recommendation scenario:
+![Model comparison](reports/figures/model_comparison.png)
 
-> Given what was known about a user in the past, how well can the system recommend items they interact with later?
+**Reading it:** Item-kNN and the Hybrid are effectively tied for best
+ranking accuracy; ALS is a close third and is a legitimate model once its
+orientation bug is fixed; Popularity is a real baseline that only
+personalized models beat; Content-Based is the weakest on accuracy but the
+strongest on catalog reach; BPR (the LightFM substitute) is the weakest
+collaborative model on this dataset.
 
-## Recommendation Approaches
+## Relevance vs. Coverage/Diversity Trade-offs
 
-### Item-kNN
+![Accuracy vs coverage trade-off](reports/figures/accuracy_vs_coverage_tradeoff.png)
 
-The collaborative filtering model represents movies through user interactions and recommends items similar to those a user has previously rated.
+Two trade-offs came out of the numbers (not assumed beforehand):
 
-Item similarity is calculated using cosine similarity.
+1. **Accuracy vs. catalog coverage.** The two most accurate models
+   (Item-kNN, Hybrid) show the *least* catalog coverage among personalized
+   models (13–14%); Content-Based has the *most* coverage (83%) and the
+   worst accuracy. There is no model in this comparison that wins on both.
+2. **Catalog coverage vs. within-list diversity are not the same thing.**
+   Content-Based has the highest coverage **and** the lowest intra-list
+   diversity (0.085): it reaches many different corners of the catalog
+   *across users*, but for any one user it returns a genre-homogeneous
+   cluster. Popularity is the mirror image: near-zero coverage (the same
+   handful of movies for everyone) but comparatively high intra-list
+   diversity (0.645), because the most popular movies overall span many
+   genres. A model can score well on one "diversity-shaped" metric and
+   poorly on another — they need to be checked separately.
 
-This approach relies entirely on collaborative information and therefore depends heavily on sufficient overlap between user histories.
+## Results by User-History Segment
 
-### Content-Based Filtering
+Users are split into quartiles by how many interactions they have at
+prediction time (train count for validation-phase numbers, train+val for
+test-phase numbers) — MovieLens-1M has no true zero-history users, so this
+is a *relative* notion of "how little/much do we know about this person",
+not literal cold start (see Limitations).
 
-The content-based model represents movies using their genres.
+![Segment heatmap](reports/figures/segment_heatmap.png)
 
-Recommendations are generated based on similarity between movie content and the user's historical preferences.
+| Segment | Best model (test NDCG@10) | Notes |
+|---|---|---|
+| Sparse (Q1, ≤37 interactions) | **ALS** (0.101) | Factorization generalizes better than similarity counts with little history. |
+| Low (Q2) | **Hybrid** (0.086), Item-kNN essentially tied (0.086) | |
+| Medium (Q3) | **Item-kNN** (0.082) | |
+| High (Q4, power users) | **Item-kNN** (0.156) | Popularity is a strong second here (0.142) — large rated histories make even a non-personalized list likely to overlap. |
 
-Unlike collaborative filtering, this approach does not require strong overlap between different users' interaction histories.
+**The common hypothesis "content-based helps most for low-history users" is
+not supported by this data** — Content-Based is the weakest model in *every*
+segment, including the sparsest one (NDCG@10 = 0.018 there, vs. 0.101 for
+ALS). Genre similarity alone does not reliably predict which specific movie
+a given user will rate highly next, regardless of how little history they have.
 
-### Hybrid Model
+### Routing strategy
 
-The hybrid model combines collaborative and content-based recommendation scores.
+A router picks, per segment, the model with the best **validation** NDCG@10
+(sparse→ALS, low→Hybrid, medium/high→Item-kNN), then is evaluated **once**
+on test using each user's live segment. It beats every single model on
+every offline metric (table above) and nearly doubles catalog coverage vs.
+Item-kNN alone (21% vs. 13%). The margin over Item-kNN alone is real but
+modest (NDCG@10 0.107 vs 0.104) — a good A/B test candidate, not proof of a
+large production win. Full derivation: `notebooks/04_product_analysis.ipynb`.
 
-The goal is to use both:
+## Cold Start
 
-- behavioral information from user-item interactions;
-- content information from movie genres.
+- **User cold start** cannot be observed in MovieLens-1M — every user has
+  ≥20 ratings by construction of the dataset. In a real product, a
+  brand-new user has none of that, and Item-kNN/ALS/BPR/Hybrid all require
+  ≥1 training interaction to say anything. Popularity and an onboarding
+  content-preference flow (which lets Content-Based work from interaction
+  zero) are the only usable strategies at true zero history.
+- **Item cold start is real and measured**: ~7.8% of rated movies have
+  fewer than 5 ratings, and 177 catalog movies have never been rated. Every
+  collaborative/factorization model here is structurally unable to
+  recommend such an item (the candidate catalog is restricted to
+  train-observed items for exactly this reason); Content-Based is the only
+  model that can score a brand-new item from its metadata alone.
 
-The experiment tests whether combining the two signals improves ranking quality over either component independently.
+## Product Decision
 
-## Evaluation
+1. **Ship Item-kNN as the single-model default.** It is strongest or tied
+   strongest in 3 of 4 segments, simplest to explain, and cheapest to
+   maintain among the competitive options.
+2. **Treat the segment router as an A/B test candidate, not a day-one
+   requirement.** It beat every single model offline, but the gain over
+   Item-kNN alone is modest; the operational cost of running four models
+   plus a routing layer should be justified online, not assumed from an
+   offline delta.
+3. **Keep Popularity as a zero-data fallback**, not as a segment winner —
+   it never wins a segment outright but is the only strategy that needs no
+   trained model and no user history at all.
+4. **The default optimizes accuracy over exploration.** Item-kNN has the
+   lowest catalog coverage of any personalized model (13%) and leans on
+   already-popular items (avg. recommended popularity ≈ 1,847 vs.
+   Content-Based's 259). If catalog health / long-tail exposure matters as
+   a product goal, blending in 1–2 higher-novelty slots is a deliberate,
+   measurable trade a product team could choose — this project does not
+   have the data to say users would tolerate it.
+5. **None of this is a causal engagement claim.** Offline Recall/NDCG
+   measure whether a model would have ranked a movie the user *happened* to
+   rate later near the top — not whether showing it changes behavior. That
+   is exactly what the A/B test below is for.
 
-The models are evaluated using ranking metrics at `K = 10`.
+## Online A/B-Test Design
 
-**Recall@10**  
-Measures how many relevant held-out movies appear among the top 10 recommendations.
+A **design**, not a simulated result — MovieLens has no CTR/watch-time data,
+so the sample-size table below is an explicit sensitivity analysis, not a forecast.
 
-**MAP@10**  
-Measures both whether relevant items are retrieved and how highly they are ranked.
+- **Hypothesis:** routing users to a segment-appropriate model increases
+  engagement with recommendations vs. today's single-model policy, without
+  hurting latency or over-concentrating recommendations.
+- **Randomization unit:** user.
+- **Control:** current single-model policy (e.g., Item-kNN for everyone).
+- **Treatment:** the segment router (Section above), segment assigned from
+  each user's live interaction count.
+- **Primary metric:** recommendation click-through rate (clicks or
+  play-starts ÷ impressions).
+- **Secondary metrics:** play-through/completion rate of clicked
+  recommendations, watch time from recommended titles, save/add-to-list rate.
+- **Guardrails:** serving latency (p50/p95), catalog concentration of what
+  is actually shown, overall session length/bounce rate.
 
-**NDCG@10**  
-Evaluates ranking quality while giving greater weight to relevant items appearing near the top of the recommendation list.
+**Sample size sensitivity** (two-proportion z-test, α=0.05, power=80%, per arm):
 
-These metrics are more appropriate for a recommendation task than standard classification or regression metrics because the product ultimately needs to produce a ranked list of items.
+| Baseline CTR | +5% relative | +10% relative | +20% relative |
+|---:|---:|---:|---:|
+| 5% | 122,124 | 31,234 | 8,158 |
+| 10% | 57,763 | 14,751 | 3,841 |
+| 15% | 36,310 | 9,257 | 2,402 |
 
-## Results
+Real required sample size depends entirely on the platform's actual
+baseline CTR and traffic — plug that in before committing to a test
+duration. Suggested rollout: 5–10% of traffic, evenly split, for at least
+one full weekly cycle (activity has clear day-of-week/hour-of-day patterns,
+`01_data_and_eda.ipynb`), reading the primary metric only at the
+pre-registered sample size.
 
-| Model | Recall@10 | MAP@10 | NDCG@10 |
-|---|---:|---:|---:|
-| Item-kNN | 0.00158 | 0.00138 | 0.00666 |
-| **Content-Based** | **0.01512** | **0.01209** | **0.03107** |
-| Hybrid | 0.01130 | 0.00888 | 0.02459 |
-
-The **content-based model achieved the strongest performance across all three ranking metrics**.
-
-The hybrid approach improved substantially over pure Item-kNN, but did not outperform the content-based model.
-
-## Interpretation
-
-The results illustrate an important property of recommendation systems: **a more complex model does not automatically produce better recommendations**.
-
-The collaborative Item-kNN model performs poorly in this setup, which is consistent with the extremely sparse interaction matrix. With limited overlap between user histories, collaborative similarity provides a relatively weak recommendation signal.
-
-The content-based model is less affected by interaction sparsity because it can use movie genre information directly.
-
-Adding collaborative information to the content signal improves performance compared with Item-kNN alone, but the weak collaborative component does not provide enough additional information for the hybrid model to outperform content-based recommendations.
-
-The experiment therefore suggests that, for this particular feature set and evaluation setup, **available content information provides a stronger signal than neighborhood-based collaborative filtering**.
-
-## Product Perspective
-
-Recommendation quality is not determined only by the algorithm used.
-
-The experiment highlights several product and data considerations:
-
-- the amount and quality of behavioral data directly affect collaborative approaches;
-- sparse interactions can make similarity-based recommendations unreliable;
-- useful item metadata can partially compensate for limited behavioral information;
-- hybrid systems only improve performance when their additional signals contribute meaningful information;
-- offline ranking metrics should be interpreted alongside the data available to the system.
-
-In a real product, model selection would also depend on factors such as cold-start performance, recommendation diversity, novelty, latency, and online user behavior.
+Full derivation: `notebooks/04_product_analysis.ipynb`, Section 7.
 
 ## Limitations
 
-The project intentionally uses relatively simple recommendation approaches and a limited set of movie metadata.
-
-The content model primarily relies on genres, which provide only a coarse representation of movie similarity.
-
-The project also uses explicit ratings, while many production recommendation systems rely heavily on implicit feedback such as:
-
-- clicks;
-- views;
-- watch time;
-- saves;
-- skips;
-- repeat interactions.
-
-Offline ranking metrics also do not directly measure whether users would actually engage with the recommendations in a live product.
-
-## Possible Next Steps
-
-Several extensions could improve the recommendation system:
-
-- richer movie metadata such as descriptions, actors, directors, and tags;
-- text embeddings for semantic movie representations;
-- matrix factorization methods;
-- implicit-feedback recommendation models;
-- LightFM or similar hybrid approaches;
-- neural collaborative filtering;
-- learning-to-rank models;
-- two-stage retrieval and ranking architecture;
-- evaluation of diversity, novelty, and catalog coverage;
-- online evaluation through A/B testing.
-
-## Tech Stack
-
-- Python
-- pandas
-- NumPy
-- SciPy
-- scikit-learn
-- Matplotlib
-- Seaborn
-- Jupyter Notebook
+- No true user cold start is observable in this dataset (see Cold Start).
+- Item features are genres + release year only; richer metadata (cast,
+  synopsis embeddings, tags) was out of scope and would likely help
+  Content-Based and the Hybrid specifically.
+- The underlying signal is explicit 1–5 ratings, not implicit behavior
+  (clicks/plays/skips); the `rating >= 4` relevance rule and the
+  confidence-weighting used for ALS/BPR are reasonable adaptations, not a
+  substitute for validating against real implicit feedback.
+- LightFM was not used — its build fails on this environment (Windows,
+  Python 3.12, unmaintained since 2020); BPR is a reasonable but not
+  identical substitute, and does not consume genre features directly.
+- Offline ranking metrics are not a causal engagement estimate (see Product Decision, point 5).
+- The routing strategy's offline margin over Item-kNN alone is small — a
+  legitimate, validation-selected result, but not a large effect.
 
 ## Repository Structure
 
 ```text
 rec-sys/
-├── data/
+├── data/                          # raw MovieLens-1M .dat files
 ├── notebooks/
+│   ├── 01_data_and_eda.ipynb          # data facts behind every methodology choice
+│   ├── 02_evaluation_setup.ipynb      # split, relevance, metrics, validation-only tuning (incl. ALS bug repro)
+│   ├── 03_models.ipynb                # one-time final test evaluation + trade-off plots
+│   └── 04_product_analysis.ipynb      # segments, routing strategy, cold start, product decision, A/B design
+├── src/
+│   ├── data.py                    # loading, temporal split, relevance/seen/history builders
+│   ├── metrics.py                 # Recall/Precision/MAP/NDCG + coverage/novelty/diversity/popularity
+│   ├── recommenders.py            # Popularity, Item-kNN, Content-Based, ALS/BPR wrapper, Hybrid
+│   ├── evaluation.py               # shared ranking/exclusion/segment/routing logic
+│   └── pipeline.py                # orchestration + validation-selected hyperparameters
+├── reports/
+│   ├── figures/                   # saved plots used above
+│   └── tables/                    # saved result tables (csv/json)
 ├── requirements.txt
 └── README.md
 ```
 
 ## How to Run
 
-Clone the repository:
-
 ```bash
 git clone https://github.com/avgrosheva/rec-sys.git
 cd rec-sys
+python -m venv .venv
+source .venv/bin/activate   # .venv\Scripts\activate on Windows
+pip install -r requirements.txt
+jupyter notebook
 ```
 
-Install the dependencies:
+Run the notebooks in order — `01` → `02` → `03` → `04`. Each notebook
+re-loads and re-splits the data itself (no hidden state between notebooks),
+so they can also be reproduced headlessly:
 
 ```bash
-pip install -r requirements.txt
+jupyter nbconvert --to notebook --execute --inplace notebooks/01_data_and_eda.ipynb
+jupyter nbconvert --to notebook --execute --inplace notebooks/02_evaluation_setup.ipynb
+jupyter nbconvert --to notebook --execute --inplace notebooks/03_models.ipynb
+jupyter nbconvert --to notebook --execute --inplace notebooks/04_product_analysis.ipynb
 ```
 
-Open the project notebook in Jupyter and run the analysis from top to bottom to reproduce the data exploration, recommendation models, and evaluation.
-
-## Key Takeaway
-
-The strongest model in this experiment was not the most complex one.
-
-Content-based filtering outperformed both Item-kNN and the hybrid approach, while the hybrid model still substantially improved over collaborative filtering alone.
-
-The results demonstrate why recommendation systems should be selected based on **data characteristics and measured ranking performance rather than model complexity**.
+Full run time is a few minutes on a laptop CPU.

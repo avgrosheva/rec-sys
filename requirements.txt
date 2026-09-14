@@ -1,8 +1,10 @@
 pandas
 numpy
+scipy
+scikit-learn
 matplotlib
 seaborn
-scikit-learn
-scipy
-tqdm
 implicit
+jupyter
+ipykernel
+nbconvert
