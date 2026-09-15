@@ -64,12 +64,14 @@ gaps, all addressed here:
    picks the winner on validation NDCG@10 only — the two families
    disagreed, and both outcomes are kept.
 3. **Test-set discipline wording.** "The test set is touched exactly once"
-   was replaced everywhere with the actual principle: *the test set is
-   never used for model, hyperparameter, representation, or routing-policy
-   selection — it is used only for final evaluation and post-hoc
-   diagnostics.* The `rating >= 3` sensitivity check was moved from test to
-   validation, and the routing policy is now explicitly frozen from
-   validation before any test-set segment result is computed.
+   was replaced with the actual principle: *all hyperparameters,
+   interaction representations, and the routing policy are selected on
+   validation only; the held-out test set is used for the final
+   comparative benchmark across the pre-specified model families and to
+   form the product recommendation, with no further offline tuning after
+   observing test results.* The `rating >= 3` sensitivity check was moved
+   from test to validation, and the routing policy is now explicitly
+   frozen from validation before any test-set segment result is computed.
 4. **Router uncertainty.** A paired user-level bootstrap
    (`src/evaluation.py::paired_bootstrap_ci`) now reports a delta and 95%
    CI for Router vs. Item-kNN, Hybrid vs. Item-kNN, and Router vs. ALS,
@@ -128,15 +130,16 @@ alike (`src/data.py::restrict_truth_to_catalog`). This exclusion is small
 here — **0.01% of validation and 0.02% of test relevant interactions** — but
 it is measured and reported rather than assumed away; see Cold Start.
 
-**Model/representation/policy selection discipline.** The test set is
-**never** used for model, hyperparameter, interaction-representation, or
-routing-policy selection — every such choice is made on validation only, in
-`notebooks/02_evaluation_setup.ipynb` (models, hyperparameters, the
-content-based history threshold, the hybrid weight, and the
-all-interactions-vs-positive-only representation for Item-kNN/ALS/BPR) and
-`notebooks/04_product_analysis.ipynb` (the segment routing policy, frozen
-before any test-set segment result is computed). Test is used only for
-final evaluation and post-hoc diagnostics.
+**Model/representation/policy selection discipline.** All hyperparameters,
+interaction representations, and the routing policy are selected on
+validation only, in `notebooks/02_evaluation_setup.ipynb` (models,
+hyperparameters, the content-based history threshold, the hybrid weight,
+and the all-interactions-vs-positive-only representation for
+Item-kNN/ALS/BPR) and `notebooks/04_product_analysis.ipynb` (the segment
+routing policy, frozen before any test-set segment result is computed). The
+held-out test set is used for the final comparative benchmark across these
+pre-specified model families and to form the product recommendation; no
+further offline tuning is performed after observing test results.
 
 ## Models Compared
 
@@ -166,18 +169,23 @@ Full numbers in `reports/tables/test_metrics.csv`.)*
 
 ![Model comparison](reports/figures/model_comparison.png)
 
-**Reading it:** ALS leads on every ranking metric here, and also has
-meaningfully higher catalog coverage (0.30) than Item-kNN (0.13) or the
-Hybrid (0.14) — after fixing its orientation bug and giving it the
-representation it actually prefers (positive-only interactions, see
-below), it is not just "competitive", it is the best model measured. Item-kNN
-and the Hybrid are close behind and effectively tied with each other.
+**Reading it:** ALS leads on every ranking metric here — after fixing its
+orientation bug and giving it the representation it actually prefers
+(positive-only interactions, see below), it is not just "competitive", it
+is the most accurate model measured. It also provides substantially
+broader catalog coverage than the other high-accuracy models, Item-kNN
+(0.13) and Hybrid (0.14): its own coverage is 0.30. BPR (0.64) and
+Content-Based (0.83) reach more of the catalog still, but at a substantial
+ranking-quality cost. Item-kNN and Hybrid are
+close in aggregate point estimates (NDCG@10 0.104 vs. 0.103), but the
+paired bootstrap (see "How Much Confidence Do We Have in the Routing
+Gain?") shows the Hybrid is consistently, if slightly, worse than Item-kNN.
 Popularity beats Content-Based but loses to every collaborative/hybrid
 model. BPR (the LightFM substitute) improved substantially from the same
 representation switch as ALS but remains behind the other collaborative
-models. Content-Based is the weakest model on ranking accuracy by a wide
-margin — genre similarity alone is a poor predictor of which specific movie
-a user will rate highly next.
+models on accuracy. Content-Based is the weakest model on ranking accuracy
+by a wide margin — genre similarity alone is a poor predictor of which
+specific movie a user will rate highly next.
 
 ## Interaction Representation Ablation
 
@@ -210,11 +218,14 @@ actually means, and removing those rows measurably helps both.
 
 Two trade-offs came out of the numbers (not assumed beforehand):
 
-1. **Accuracy vs. catalog coverage, but not a strict trade-off.** ALS now
-   leads on *both* accuracy and coverage among the personalized
-   collaborative models — it is not "accurate but narrow" the way Item-kNN
-   and the Hybrid are (13–14% coverage). Content-Based remains the extreme
-   opposite: the weakest accuracy and the widest coverage (83%) of any model.
+1. **Accuracy vs. catalog coverage.** ALS leads on ranking accuracy while
+   providing substantially broader catalog coverage than the other
+   high-accuracy models, Item-kNN and Hybrid (13–14% coverage vs. ALS's
+   30%) — it is not "accurate but narrow" the way those two are. BPR and
+   Content-Based reach more of the catalog still (64% and 83%), but at a
+   substantial ranking-quality cost: Content-Based in particular is the
+   extreme opposite of ALS, combining the weakest accuracy with the widest
+   coverage (83%) of any model.
 2. **Catalog coverage and within-list diversity are not the same thing.**
    Content-Based has the highest coverage **and** the lowest intra-list
    diversity (0.085): it reaches many different corners of the catalog
@@ -295,24 +306,34 @@ resolve what two aggregate numbers alone cannot.
   ≥1 training interaction to say anything. Popularity and an onboarding
   content-preference flow (which lets Content-Based work from interaction
   zero) are the only usable strategies at true zero history.
-- **Item cold start is real, and now measured two ways.** Dataset-wide
-  (`01_data_and_eda.ipynb`): ~7.8% of rated movies have fewer than 5
-  ratings, and 177 catalog movies have never been rated. Inside the ranking
-  evaluation itself (`02`/`03`): 0.01–0.02% of relevant validation/test
-  interactions belong to items not yet in the candidate catalog and are
-  excluded from ranking metrics rather than counted as a miss for every
-  model — a small but directly quantified rate, not an assumption.
-  Collaborative/factorization models are structurally unable to recommend
-  such items at all; Content-Based is the only model here that can score a
-  brand-new item from its metadata alone.
+- **Item cold start, kept distinct from catalog sparsity.** Three different
+  things are easy to blur together and are kept separate here:
+  - *Catalog sparsity / long tail* (`01_data_and_eda.ipynb`): ~7.8% of
+    rated movies have fewer than 5 ratings. These items have *some*
+    collaborative signal, just very little of it — this is sparsity, not
+    zero-interaction cold start.
+  - *True zero-interaction item cold start* (`01_data_and_eda.ipynb`): 177
+    catalog movies (out of 3,883) have never been rated at all.
+    Collaborative/factorization models (Item-kNN, ALS, BPR) are
+    structurally unable to recommend these — there is no interaction
+    signal for them to use. Content-Based is the only model here that can
+    score such an item from its genres and release year alone.
+  - *Evaluation-time item cold start* (`02`/`03`): 0.01–0.02% of relevant
+    validation/test interactions belong to items not yet in the candidate
+    catalog at that point in time, and are excluded from ranking metrics
+    rather than counted as a miss for every model — a small, directly
+    quantified rate, not an assumption (`src/data.py::restrict_truth_to_catalog`).
 
 ## Product Decision
 
-1. **Ship ALS as the default model.** It leads on every ranking metric
-   measured (NDCG@10 = 0.106) *and* has meaningfully higher catalog
-   coverage (0.30) than Item-kNN (0.13) or the Hybrid (0.14) — a rare case
-   where one model does not trade accuracy for reach. Item-kNN remains a
-   simpler, close-third fallback (no factorization training) at NDCG@10 = 0.104.
+1. **Take ALS forward as the leading candidate for an online A/B test.** It
+   leads on every ranking metric measured (NDCG@10 = 0.106) and provides
+   substantially broader catalog coverage than the other high-accuracy
+   models, Item-kNN (0.13) and Hybrid (0.14) — a rare case where the most
+   accurate model does not also have the narrowest reach among them. BPR
+   and Content-Based still reach more of the catalog than ALS, at a
+   substantial accuracy cost (see Trade-offs). Item-kNN remains a simpler,
+   close-third fallback (no factorization training) at NDCG@10 = 0.104.
 2. **Do not build the segment router, and do not ship the Hybrid.** The
    router looked like the best result in this project before its
    uncertainty was quantified; the bootstrap above shows its edge over
@@ -379,9 +400,12 @@ Full derivation: `notebooks/04_product_analysis.ipynb`, Section 9.
 ## Limitations
 
 - No true user cold start is observable in this dataset (see Cold Start).
-- Item cold start is small but real and now directly quantified (0.01–0.02%
-  of relevant interactions structurally unrecommendable), rather than
-  folded into the ranking metrics.
+- Item cold start is now kept distinct from catalog sparsity (see Cold
+  Start): ~7.8% of rated movies are sparse (long tail, not zero
+  interactions), 177 movies have zero interactions dataset-wide, and
+  0.01–0.02% of relevant validation/test interactions are evaluation-time
+  item cold start — directly quantified and excluded from ranking metrics
+  rather than folded into them.
 - Item features are genres + release year only; richer metadata (cast,
   synopsis embeddings, tags) was out of scope and would likely help
   Content-Based and the Hybrid specifically.
