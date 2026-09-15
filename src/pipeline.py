@@ -30,6 +30,15 @@ BEST_PARAMS = {
     "bpr_iterations": 100,
     "hybrid_partner": "Item-kNN",
     "hybrid_alpha": 0.1,
+    # Interaction-representation choice from the ablation in
+    # 02_evaluation_setup.ipynb Section 4.7 (validation NDCG@10 only):
+    # None = representation A ("all interactions"); D.RELEVANT_RATING_THRESHOLD
+    # = representation B ("positive-only", rating >= 4).
+    # Item-kNN prefers A (0.1114 vs 0.1083 NDCG@10 on validation); ALS and
+    # BPR both prefer B (ALS: 0.0998 vs 0.0881; BPR: 0.0778 vs 0.0651).
+    "itemknn_min_rating": None,
+    "als_min_rating": 4,
+    "bpr_min_rating": 4,
 }
 
 
@@ -49,24 +58,36 @@ def fit_all_models(df, movies, item_id_to_idx, train_splits, params=BEST_PARAMS,
     train_df = df[df["split"].isin(train_splits) & df["item_idx"].isin(item_pos)]
     pop_count = E.item_pop_count(df, train_splits)
     feature_matrix, genre_names = D.build_movie_features(movies, catalog_items, item_id_to_idx)
-    conf_matrix = E.build_confidence_matrix(df, train_splits, n_users, catalog_items, item_pos, CONFIDENCE_ALPHA)
 
     pop_model = PopularityRecommender().fit(catalog_items, pop_count)
-    knn_model = ItemKNNRecommender().fit(train_df, catalog_items, item_pos)
+
+    knn_train_df = train_df
+    if params.get("itemknn_min_rating") is not None:
+        knn_train_df = train_df[train_df["rating"] >= params["itemknn_min_rating"]]
+    knn_model = ItemKNNRecommender().fit(knn_train_df, catalog_items, item_pos)
+
     cb_model = ContentBasedRecommender().fit(
         train_df, catalog_items, item_pos, feature_matrix, params["content_min_rating"], pop_model.scores
+    )
+
+    als_conf_matrix = E.build_confidence_matrix(
+        df, train_splits, n_users, catalog_items, item_pos, CONFIDENCE_ALPHA, params.get("als_min_rating")
     )
     als_model = FactorModelRecommender(
         AlternatingLeastSquares(
             factors=params["als_factors"], regularization=params["als_regularization"],
             iterations=params["als_iterations"], random_state=random_state,
         )
-    ).fit(conf_matrix)
+    ).fit(als_conf_matrix)
+
+    bpr_conf_matrix = E.build_confidence_matrix(
+        df, train_splits, n_users, catalog_items, item_pos, CONFIDENCE_ALPHA, params.get("bpr_min_rating")
+    )
     bpr_model = FactorModelRecommender(
         BayesianPersonalizedRanking(
             factors=params["bpr_factors"], iterations=params["bpr_iterations"], random_state=random_state,
         )
-    ).fit(conf_matrix)
+    ).fit(bpr_conf_matrix)
 
     partner = {"Item-kNN": knn_model, "ALS": als_model, "BPR": bpr_model}[params["hybrid_partner"]]
     hybrid_model = HybridRecommender(cb_model, partner, params["hybrid_alpha"])

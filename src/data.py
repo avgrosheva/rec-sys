@@ -100,9 +100,45 @@ def get_truth(df, split_name, threshold=RELEVANT_RATING_THRESHOLD):
     Users with zero qualifying items in the split simply do not appear as
     keys; they form no evaluation signal for that split (see cohort size
     reporting in 02_evaluation_setup.ipynb).
+
+    NOTE: this is the *raw* relevant-item truth. It is not restricted to the
+    candidate catalog a model can actually recommend from — some of these
+    items may only appear later than the current train/train+val cutoff
+    ("item cold start"). Ranking evaluation must use
+    `restrict_truth_to_catalog()` below on top of this, so that no model is
+    penalised for failing to recommend an item nothing could have
+    recommended.
     """
     sub = df[(df["split"] == split_name) & (df["rating"] >= threshold)]
     return sub.groupby("user_idx")["item_idx"].apply(set).to_dict()
+
+
+def restrict_truth_to_catalog(truth, item_pos):
+    """Keep only relevant items that are actually in the candidate catalog.
+
+    Returns (recommendable_truth, stats). `stats` reports how many relevant
+    interactions were dropped because the item is not yet in the candidate
+    catalog (i.e. it never appeared in the training data available at that
+    point) -- this is the quantitative item-cold-start rate, reported
+    separately rather than silently folded into the ranking metrics.
+    """
+    recommendable = {}
+    total_relevant = 0
+    excluded = 0
+    for u, items in truth.items():
+        total_relevant += len(items)
+        keep = {i for i in items if i in item_pos}
+        excluded += len(items) - len(keep)
+        if keep:
+            recommendable[u] = keep
+    stats = {
+        "total_relevant_interactions": total_relevant,
+        "excluded_not_in_catalog": excluded,
+        "excluded_share": excluded / total_relevant if total_relevant else 0.0,
+        "users_before": len(truth),
+        "users_after": len(recommendable),
+    }
+    return recommendable, stats
 
 
 def get_seen(df, split_names):

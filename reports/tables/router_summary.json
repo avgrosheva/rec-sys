@@ -3,18 +3,18 @@
     "high (Q4)": "Item-kNN",
     "low (Q2)": "Hybrid",
     "medium (Q3)": "Item-kNN",
-    "sparse (Q1)": "ALS"
+    "sparse (Q1)": "Hybrid"
   },
   "router_test_metrics": {
-    "Recall@K": 0.08750541940145261,
-    "Precision@K": 0.08075752451809266,
-    "MAP@K": 0.05241203225487892,
-    "NDCG@K": 0.10645777648096685,
-    "n_users": 5914,
-    "Coverage@K": 0.2143051400598314,
-    "Novelty@K": 9.113430626310839,
-    "Diversity@K": 0.6178493499755859,
-    "AvgPopularity@K": 1681.6791680757524
+    "Recall@K": 0.08372230725692334,
+    "Precision@K": 0.08014208389715831,
+    "MAP@K": 0.051383119218343376,
+    "NDCG@K": 0.10472925106080043,
+    "n_users": 5912,
+    "Coverage@K": 0.138156105520805,
+    "Novelty@K": 8.986928045489117,
+    "Diversity@K": 0.6082920432090759,
+    "AvgPopularity@K": 1791.2226319350473
   },
   "edges_val": [
     31.0,

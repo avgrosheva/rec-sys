@@ -17,17 +17,26 @@ def item_pop_count(df, split_names):
     return sub.groupby("item_idx").size().to_dict()
 
 
-def build_confidence_matrix(df, split_names, n_users, catalog_items, item_pos, alpha=2.0):
+def build_confidence_matrix(df, split_names, n_users, catalog_items, item_pos, alpha=2.0, min_rating=None):
     """(n_users, n_catalog) confidence matrix for implicit-feedback models.
 
-    confidence = 1 + alpha * (rating - 1), following Hu et al. (2008); every
-    interaction counts as an implicit positive signal regardless of its
-    rating value (the model observes "the user watched/rated this"), while
-    the *evaluation* relevance definition (rating >= 4) is applied
-    separately and only when scoring ranking quality.
+    confidence = 1 + alpha * (rating - 1), following Hu et al. (2008).
+
+    `min_rating` selects between the two interaction representations
+    compared in 02_evaluation_setup.ipynb Section 4.7:
+    - `min_rating=None` (representation A, "all interactions"): every
+      observed interaction is fed in as an implicit positive signal
+      regardless of its rating value.
+    - `min_rating=RELEVANT_RATING_THRESHOLD` (representation B,
+      "positive-only"): only interactions that are themselves relevant
+      (rating >= threshold) are fed in, so a disliked interaction never
+      contributes a positive signal.
+    The choice is made on validation NDCG@10 only; see that notebook.
     """
     sub = df[df["split"].isin(split_names)]
     sub = sub[sub["item_idx"].isin(item_pos)]
+    if min_rating is not None:
+        sub = sub[sub["rating"] >= min_rating]
     rows = sub["user_idx"].values
     cols = np.array([item_pos[i] for i in sub["item_idx"].values])
     vals = 1.0 + alpha * (sub["rating"].values.astype(float) - 1.0)
@@ -108,3 +117,35 @@ def apply_router(router, rec_lists_by_model, segment_of_user, users):
             continue
         routed[u] = rec_lists_by_model[model_name].get(u, [])
     return routed
+
+
+def paired_bootstrap_ci(rec_lists_a, rec_lists_b, truth, k, metric_fn=M.ndcg_at_k,
+                         n_boot=10000, seed=42, alpha=0.05):
+    """Paired user-level bootstrap CI for (metric(A) - metric(B)) over the
+    users common to both rec_lists dicts and present in truth.
+
+    Users, not individual scores, are resampled with replacement, so the
+    pairing between A's and B's score for the same user is preserved in
+    every resample (a "paired" bootstrap) -- appropriate because A and B are
+    two rankings for the *same* users, not independent samples.
+    """
+    users = [u for u in truth if u in rec_lists_a and u in rec_lists_b]
+    scores_a = np.array([metric_fn(rec_lists_a[u], truth[u], k) for u in users])
+    scores_b = np.array([metric_fn(rec_lists_b[u], truth[u], k) for u in users])
+    observed_delta = float(scores_a.mean() - scores_b.mean())
+
+    rng = np.random.default_rng(seed)
+    n = len(users)
+    deltas = np.empty(n_boot)
+    for i in range(n_boot):
+        idx = rng.integers(0, n, size=n)
+        deltas[i] = scores_a[idx].mean() - scores_b[idx].mean()
+
+    lo, hi = np.quantile(deltas, [alpha / 2, 1 - alpha / 2])
+    return {
+        "n_users": n,
+        "observed_delta": observed_delta,
+        "ci_low": float(lo),
+        "ci_high": float(hi),
+        "ci_includes_zero": bool(lo <= 0 <= hi),
+    }
